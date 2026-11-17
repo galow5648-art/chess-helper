@@ -1,1 +1,77 @@
 
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Unpack newest project zip
+        run: |
+          NEWEST=""
+          NEWEST_T=0
+          for f in *.zip; do
+            t=$(git log -1 --format=%ct -- "$f")
+            if [ "$t" -gt "$NEWEST_T" ]; then NEWEST_T=$t; NEWEST="$f"; fi
+          done
+          echo "Using: $NEWEST"
+          mkdir work
+          unzip -q "$NEWEST" -d work
+          ls work
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Get Stockfish (arm64)
+        run: |
+          set -e
+          mkdir -p work/app/src/main/jniLibs/arm64-v8a sf
+          BIN=""
+          for tag in sf_18 sf_17.1 sf_17 sf_16.1; do
+            if curl -fsSL -o sf.tar "https://github.com/official-stockfish/Stockfish/releases/download/$tag/stockfish-android-armv8.tar"; then
+              echo "Downloaded Stockfish $tag"
+              rm -rf sf && mkdir sf && tar -xf sf.tar -C sf
+              BIN=$(find sf -type f -name 'stockfish-android-armv8*' | head -n1)
+              if [ -n "$BIN" ] && [ "$(head -c 4 "$BIN" | tail -c 3)" = "ELF" ]; then break; fi
+              BIN=""
+            fi
+          done
+          if [ -z "$BIN" ]; then
+            echo "Prebuilt binary not found, building Stockfish from source with the NDK"
+            git clone --depth 1 --branch sf_17 https://github.com/official-stockfish/Stockfish.git sfsrc
+            NDK="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+            export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+            cd sfsrc/src
+            make -j4 build ARCH=armv8 COMP=ndk
+            BIN="$PWD/stockfish"
+            cd ../..
+          fi
+          cp "$BIN" work/app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          chmod +x work/app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          ls -l work/app/src/main/jniLibs/arm64-v8a/
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
+
+      - name: Build debug APK
+        working-directory: work
+        run: gradle assembleDebug --no-daemon
+
+      - name: Check Stockfish is inside the APK
+        run: unzip -l work/app/build/outputs/apk/debug/app-debug.apk | grep libstockfish
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chess-helper-apk
+          path: work/app/build/outputs/apk/debug/app-debug.apk
